@@ -336,6 +336,10 @@ doesn't create a DAP object by itself and will silently do nothing.
 
 ## Project C — Custom firmware (in progress)
 
+> **New to firmware?** `firmware-guide.md` is a from-scratch walkthrough of the
+> architecture, the testing, and the flashing process, with every term and
+> acronym defined. This section assumes that background; the guide supplies it.
+
 Decision: build and verify firmware first; **do not flash yet.** Several units
 are available, so sacrificing one is acceptable, but there's no reason to
 spend one before the code is ready.
@@ -418,29 +422,86 @@ OF SPI."*
 operates at ~3.7–4.2V, not 3.3V. External power for recovery goes to the
 +BATT node, and SWD lines swing at battery voltage rather than a clean 3.3V.
 
+### Custom firmware — written, builds, not yet flashed
+`fw/` is a fresh bare-metal project (no HAL, no newlib — only the CMSIS
+headers from `firmware/`, as headers). Two apps, both small enough to audit
+end to end:
+
+| app | flash | RAM | what it does |
+|---|---|---|---|
+| `beacon` | 480 B | 64 B | proves build → flash → boot → run. Touches no GPIO at all. |
+| `shell` | 1080 B | 64 B | executes commands written over SWD, so pin discovery needs no reflash. |
+
+```
+cd fw && make both     # guard tests + both apps
+```
+
+Everything follows from the rule above — first flash must preserve SWD:
+
+- **Neither app sleeps.** The build audits clean for `wfi`/`wfe`, so STOP mode
+  is unreachable. Once flashed, the charging dance goes away entirely and the
+  debug port is up whenever the battery is.
+- **Clock tree left at reset defaults.** Nothing to misconfigure. The cost is
+  not knowing the core frequency up front (`HSIFS` is an option byte: 4 / 8 /
+  16 / 22.12 / 24 MHz), so the firmware exports a raw SysTick count and
+  `x2.sh alive` measures the real clock against wall-clock instead of guessing.
+- **`IWDG` kicked unconditionally**, in the reset handler and every loop.
+  Kicking a stopped watchdog is a no-op, so it costs nothing; if the option
+  bytes enable IWDG in hardware mode, an un-kicked watchdog would reset
+  forever and look exactly like a bad flash.
+- **Fault handlers spin instead of resetting** — a crash stays attachable.
+- **`beacon` references zero GPIO registers**, verified in the built image.
+  This matters because the coil driver pin is still unidentified on the X2,
+  and an unknown pin driven high is the one mistake here that starts a fire.
+
+The `shell` guards PA13/PA14 against every pin command and refuses raw writes
+to GPIOA's config registers and to the flash controller — so it can neither
+drop the debug link nor erase the firmware running it. `CMD_PIN_PULSE` hands
+the pin back to input when it finishes, so a discovery sweep can't park an
+unknown pin in a driven state. `-Os` inlines all of that out of the
+disassembly, so the guards live in a hardware-free `common/guards.h` and are
+asserted on the host instead.
+
+**Testing, since none of this can be flashed yet.** The firmware compiles for
+x86 under `HOST_TEST` against a fake register map, so the logic runs natively:
+**101 assertions** across the guard rules in isolation (30) and the dispatcher
+that applies them (71) — register bit math, pulse teardown, argument
+validation, boot counting across a warm reset. On top of that
+`tools/verify_image.sh` checks the *linked binary* rather than the source: no
+`wfi`/`wfe`, beacon pinned at `0x20000000`, MSP at top of RAM, valid reset
+vector, and zero GPIO references in `beacon`. `make check` is the gate.
+
+Emulation was considered and mostly declined. Firmadyne-class tools are the
+wrong shape — they unpack a squashfs rootfs and boot a QEMU Linux kernel, and
+8KB of RAM runs no Linux. Renode could model a PY32-shaped machine properly
+and will be worth it for the LED panel's shift-register bus, but for a
+480-byte busy loop, modelling the peripherals faithfully costs more than the
+host tests did — and a mismodelled peripheral gives confident wrong answers.
+
+**Highest-value untested link: the flash write path itself.** A bare
+PY32F030 dev board is about a dollar, has exposed BOOT0, and can be bricked
+freely — shaking out pyOCD + the Puya DFP pack there would make the first
+write to an actual vape the first boring one.
+
+Protocol: a 64-byte struct pinned at `0x20000000`. Host writes
+`cmd`/`arg0`/`arg1`, then bumps `cmd_seq` **last** — the bump is what makes a
+command visible, so a half-written command can never run. This stands in for
+the serial console we can't have.
+
 ### Next step: verify the pinout against the actual X2
 Static analysis of the dump was inconclusive — linear disassembly of a
 stripped binary interleaves code and data. One useful correction though:
 **PY32 puts GPIO at `IOPORT_BASE = 0x50000000`**, not STM32's `0x48000000`
-(GPIOA `0x50000000`, GPIOB `0x50000400`, GPIOF `0x50001400`). Scanning the
-dump for GPIOB/GPIOF base literals hits; GPIOA's base is synthesized rather
-than stored as a literal.
+(GPIOA `0x50000000`, GPIOB `0x50000400`, GPIOF `0x50001400`).
 
-Better approach, not yet done — **read the live GPIO registers over SWD**
-while the unit is charging. Ground truth from the real board beats inference
-from a sibling schematic. Read for GPIOA/GPIOB/GPIOF:
+`fw/tools/x2.sh gpio A` does this now, and it works **against the stock
+firmware** — it's a pure read, same risk class as the dump, no flashing
+required. It decodes MODER/PUPDR/IDR/ODR/AFR into a per-pin table. If PA11/PA12
+come back as output or SPI-AF and PA15 as a plain output, the X Jam mapping
+carries over to the X2.
 
-| Register | Offset | Tells us |
-|----------|--------|----------|
-| `MODER`  | +0x00  | input / output / AF / analog per pin |
-| `OTYPER` | +0x04  | push-pull vs open-drain |
-| `PUPDR`  | +0x0C  | pull-up/down |
-| `IDR`    | +0x10  | live input states |
-| `ODR`    | +0x14  | live output states |
-| `AFR[0]/[1]` | +0x20 / +0x24 | alternate-function mux |
-
-If PA11/PA12 read as output or SPI-AF and PA15 as a plain output, the X Jam
-mapping carries over. Pure read, no writes — same risk class as the dump.
+Rig for it, unchanged: vape seated in the breakout, charger in the female
+side, actively charging, probe GND / SWDIO→B5 / SWCLK→A5 held steady.
 
 ### Known gap: the display driver
 VapeRE's `lcd.c` drives an **ST7789 SPI LCD** (the Lost Mary's panel). The X2
@@ -454,12 +515,47 @@ Better first targets: toggle a GPIO observable on a meter, or bring up
 VapeRE's UART console. Either proves build → flash → boot works without
 depending on unmapped hardware.
 
-### Flashing toolchain — not yet set up
-OpenOCD 0.12 has **no PY32 flash driver** (confirmed: no py32/puya configs
-present). Reads worked because reads need no flash algorithm; **writes do.**
-VapeRE uses **pyOCD with Puya's DFP pack** — see `py32-template`
-(`https://github.com/jaydcarlson/py32-template`) for setup. Note `pip3` is
-not installed on this machine either.
+### Flashing toolchain — built, using OpenOCD alone
+OpenOCD 0.12 has **no PY32 flash driver**, and reads worked only because reads
+need no flash algorithm. Rather than take on pyOCD + Puya's DFP pack (and
+`pip3`, still not installed), `fw/tools/py32_flash.tcl` drives the flash
+controller directly from the host with the core halted — with the CPU stopped
+there is no instruction fetch from flash during a program cycle, which is the
+whole reason the vendor HAL marks its programming routine `__RAM_FUNC`.
+
+Sequence taken from the vendor HAL, not guessed. Three quirks:
+- **Erase is triggered by a dummy write** into the target page, not a start bit.
+- **Programming is page-at-a-time**: exactly 32 words (128 B), `CR.PGSTRT` set
+  after the 31st, and the final word commits the page.
+- **Flash timing registers are mandatory.** `FLASH->TS0..PRETPE` load from a
+  per-clock factory block in the info area selected by `RCC_ICSCR.HSI_FS`
+  (`_FlashTimmingParam[]`: `0x1FFF0F1C` @4 MHz … `0x1FFF0F6C` @24 MHz). Wrong
+  values can damage cells, so the driver refuses to proceed if the block reads
+  erased.
+
+Flash geometry: **128-byte pages**, 4 KB sectors, 64 KB total. Unlock keys
+`0x45670123` / `0xCDEF89AB`.
+
+**Tested without hardware:** `make flashtest` runs the real driver against a
+simulated flash controller inside OpenOCD's own Jim interpreter — 30
+assertions covering timing-field extraction, erase/program sequencing, the
+write guard, and multi-page writes with a short final page. The simulator
+models dummy-write erase, the page buffer, PGSTRT ordering, LOCK enforcement,
+and program-can-only-clear-bits.
+
+**Tested on hardware without risk:** the stock image leaves
+`0x0800849C–0x0800F000` erased — 27 KB nothing depends on. `flash-selftest`
+does unlock → timing → erase → program → verify → re-erase in a page there
+**while the vape keeps running normally**. This replaces buying a dev board.
+The write guard enforces it: writes are confined to `0x08009000–0x0800F000`
+by default, and the stock firmware region and the 128-byte factory calibration
+page at `0x0800F000` are refused until `py32_arm_live` is called explicitly.
+
+**Still unproven:** the vendor fills the page buffer from RAM at full speed;
+we fill it over SWD at 100 kHz. If the buffer has an undocumented timeout,
+programming fails — and `flash-selftest` is exactly where that surfaces,
+harmlessly, on a blank page. Fallback is a small RAM-resident stub doing the
+32 writes at full clock.
 
 ### On getting a serial console without the debug probe
 Not really available while the case is sealed. The PY32F030 has no USB
