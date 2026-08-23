@@ -503,6 +503,113 @@ carries over to the X2.
 Rig for it, unchanged: vape seated in the breakout, charger in the female
 side, actively charging, probe GND / SWDIO→B5 / SWCLK→A5 held steady.
 
+### Hardware session results — link, protection, pinout
+
+**Link quality: excellent, and much better than earlier sessions.** Sweeping
+25 kHz to 2 MHz, every speed was 100% clean — **zero corrupt words across 4480
+comparisons** against CPUID and the stock dump. Working speed is now
+`ADAPTER_SPEED=1000` rather than 100 kHz. That also de-risks the flash page
+buffer question: we fill it 10x faster than the timing we were worried about.
+
+Getting there needed the **vape flipped in the breakout** — orientation
+decides which physical pin lands on A5 vs B5. First orientation gave
+`cannot read IDR` on every attempt; flipped, 4/4 clean connects with
+`DPIDR 0x0BC11477`.
+
+**Flash protection: all clear.** Nothing blocks writing.
+
+| Register | Value | Meaning |
+|---|---|---|
+| `OPTR` | `0x0000FEAA` | RDP `0xAA` = level 0, no readout protection |
+| `SDKR` | `0x0000001F` | start 31 > end 0 = empty range, SDK protection off |
+| `WRPR` | `0x0000FFFF` | 16 sectors, 1 = writable, so all 16 writable |
+| `RCC_ICSCR` | `0x014C9301` | `HSI_FS` = 4, so **24 MHz**; timing block `0x1FFF0F6C` |
+
+Note `WRPR`: this part has 16 sectors of 4 KB, one bit each, so `0x0000FFFF`
+*is* the all-clear value — not `0xFFFFFFFF`. The tool decodes all three now
+rather than printing raw values, because in each case the safe value is not
+the obvious one.
+
+**The flash timing math is validated against real silicon.** All nine live
+timing registers already match exactly what our field extraction produces from
+the factory block at `0x1FFF0F6C`:
+
+```
+EPPARA0 0x01B0B4B4 -> TS0 0xB4   TS1 0x1B0  TS3 0xB4
+EPPARA1 0x06C000B4 -> TS2P 0xB4  TPS3 0x6C0
+EPPARA2 0x00014820 -> PERTPE  0x14820
+EPPARA3 0x00014820 -> SMERTPE 0x14820
+EPPARA4 0x12C05DC0 -> PRGTPE 0x5DC0  PRETPE 0x12C0
+```
+The simulator used invented values but identical extraction logic, and it
+lands precisely on what the chip already has loaded. This was the scariest
+part of the write path — wrong timings can damage cells — and it is now
+confirmed rather than inferred.
+
+### Pinout — verified live, BD0061 mostly holds
+
+Read from the running chip, not inferred. **Confirmed:** PA13/PA14 are
+`AF0 = SWJ` (SWD) — definitive. PA15 output (`LED_ENABLE`), PA12 output
+(`LED_DI`), PF4 input with **pull-down**, exactly right for BOOT0.
+
+**Three corrections to the assumed mapping:**
+
+- **PA11 is `AF2`, not a plain output.** The display clock is peripheral-driven
+  (SPI2 or a timer), not bit-banged. Changes how a display driver must be written.
+- **PA3 is a digital input with pull-down, not analog.** The slide switch is
+  read digitally; this doc's earlier "likely ADC-read" guess was wrong.
+- **PB4/PB6 roles are swapped** versus the guess (PB4 input, PB6 output).
+  PB5 input-with-pull-up does match `CHRG` status.
+
+**New: PA4 and PA5 are `AF13`,** and every `AF13` option on this part is a
+timer — so those are almost certainly PWM outputs. Heater power is normally
+PWM-controlled, which makes them the **strongest coil-driver candidates** so
+far. Not proven. Treat as live until it is.
+
+Full port state (idle, on charge): outputs are PA0, PA1, PA12, PA15, PB2, PB6,
+PB7, PB8, PF3. PB7 sits driven high. Any of these could be the heater gate,
+which is exactly why `beacon` touches no GPIO at all.
+
+### The write path — partly proven, not yet complete
+
+`flash-selftest` on scratch page `0x0800C000` got through:
+- page confirmed blank
+- unlock succeeded (`CR.LOCK` cleared)
+- timing loaded for 24 MHz from `0x1FFF0F6C`
+
+then failed on the erase trigger:
+```
+Error: Failed to write memory at 0x0800c004
+```
+
+**This is expected behaviour, not a fault.** The dummy write that starts an
+erase stalls the AHB bus for the milliseconds the flash array needs, and the
+debug AP surfaces that stall as a transfer fault — note the reported address
+is `0x0800c004`, the transaction *after* ours. The driver now swallows the
+fault on trigger writes and judges success from `SR` plus a read-back instead.
+`py32_wait` also tolerates transient read faults while the array is busy.
+
+Because the trigger fault is now swallowed, a missing-timing mistake could no
+longer announce itself, so `py32_timing_check` was added — it reads `PRGTPE`
+and `PERTPE` directly and refuses to erase or program if they are zero. That
+guard works on hardware, not only in the simulator.
+
+**Still unproven: whether erase and program actually succeed.** The session
+ended before the fix could be tested — the battery reached 100%, the stock
+firmware entered STOP, and the debug port went with it. Nothing was written;
+the failure happened before any erase began.
+
+One operational note: the selftest errored out before reaching `resume`, which
+left the CPU halted and the display dark. That looks alarming and is harmless —
+`halt; py32_end; resume` restores it.
+
+### Next hardware session
+1. Drain to roughly 70–80% (it must be charging but not full).
+2. Flip orientation as needed until `DPIDR 0x0BC11477` reads clean.
+3. `ADAPTER_SPEED=1000 ./tools/x2.sh flash-selftest` — the one open question.
+4. If it passes, the write path is proven end to end and `flash-app beacon`
+   becomes reasonable.
+
 ### Known gap: the display driver
 VapeRE's `lcd.c` drives an **ST7789 SPI LCD** (the Lost Mary's panel). The X2
 uses a **segmented LED panel on a shift-register bus** — different hardware

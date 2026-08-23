@@ -56,7 +56,13 @@ proc read_memory {addr width count} {
     set a [expr {$addr + $i*4}]
     if {$a == 0x40022010}     { lappend out $::SIM_SR } \
     elseif {$a == 0x40022014} { lappend out $::SIM_CR } \
-    else                      { lappend out [sim_get $a] }
+    elseif {$a >= 0x40022100 && $a <= 0x40022120} {
+      if {[dict exists $::SIM_TIMING [K $a]]} {
+        lappend out [dict get $::SIM_TIMING [K $a]]
+      } else {
+        lappend out 0                 ;# real reset value
+      }
+    } else                    { lappend out [sim_get $a] }
   }
   return $out
 }

@@ -1,2 +1,5 @@
 firmware/build/
 fw/build/
+fw/survey-*.txt
+fw/survey-*.bin
+fw/*.bin

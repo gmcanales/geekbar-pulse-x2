@@ -95,7 +95,9 @@ proc h32 {v}     { return [format "0x%08X" [expr {$v & 0xffffffff}]] }
 proc py32_wait {{what "operation"} {tries 400}} {
   global F_SR SR_BSY SR_EOP SR_WRPERR SR_OPTVERR
   for {set i 0} {$i < $tries} {incr i} {
-    set sr [rd32 [fr $F_SR]]
+    # While the array is mid-operation the bus stalls, and the debug AP
+    # surfaces that as a read fault. Retry rather than give up.
+    if {[catch {rd32 [fr $F_SR]} sr]} { continue }
     if {!($sr & $SR_BSY)} {
       if {$sr & $SR_WRPERR} {
         wr32 [fr $F_SR] $SR_WRPERR
@@ -169,12 +171,32 @@ proc py32_end {} {
   py32_lock
 }
 
+# The write that starts an erase, or commits a programmed page, stalls the
+# AHB bus for the milliseconds the flash array needs. The debug AP reports
+# that stall as a transfer fault even though the operation began correctly —
+# so swallow the fault here and judge success from SR and a read-back.
+proc py32_trigger {addr val} {
+  catch {wr32 $addr $val}
+}
+
+# Now that the trigger write's bus fault is swallowed, a bad erase can no
+# longer announce itself by erroring — so check the precondition directly.
+# The timing registers reset to zero, and programming with zero timings is
+# what damages cells.
+proc py32_timing_check {} {
+  global F_PRGTPE F_PERTPE
+  if {[rd32 [fr $F_PRGTPE]] == 0 || [rd32 [fr $F_PERTPE]] == 0} {
+    error "flash timing registers are not loaded - call py32_begin first"
+  }
+}
+
 proc py32_erase_page {addr} {
   global F_CR CR_PER PAGE_SIZE
+  py32_timing_check
   py32_guard $addr $PAGE_SIZE
   if {$addr % $PAGE_SIZE} { error "erase address [h32 $addr] is not page-aligned" }
   wr32 [fr $F_CR] $CR_PER
-  wr32 $addr 0xFF          ;# the dummy write is what triggers the erase
+  py32_trigger $addr 0xFF   ;# the dummy write is what triggers the erase
   py32_wait "page erase at [h32 $addr]"
   wr32 [fr $F_CR] 0
 }
@@ -184,6 +206,7 @@ proc py32_erase_page {addr} {
 # the number of SWD round-trips low.
 proc py32_program_page {addr words} {
   global F_CR CR_PG CR_PGSTRT PAGE_SIZE PAGE_WORDS
+  py32_timing_check
   py32_guard $addr $PAGE_SIZE
   if {$addr % $PAGE_SIZE} { error "program address [h32 $addr] is not page-aligned" }
   if {[llength $words] != $PAGE_WORDS} {
@@ -192,7 +215,7 @@ proc py32_program_page {addr words} {
   wr32 [fr $F_CR] $CR_PG
   write_memory $addr 32 [lrange $words 0 30]
   wr32 [fr $F_CR] [expr {$CR_PG | $CR_PGSTRT}]
-  wr32 [expr {$addr + 124}] [lindex $words 31]
+  py32_trigger [expr {$addr + 124}] [lindex $words 31]
   py32_wait "page program at [h32 $addr]"
   wr32 [fr $F_CR] 0
 }
@@ -218,9 +241,24 @@ proc py32_info {} {
   echo "  CR   [h32 $cr]    (LOCK [expr {($cr & $CR_LOCK) ? "set - normal" : "CLEAR - already unlocked"}])"
 
   echo "protection"
-  echo "  OPTR [h32 [rd32 [fr $F_OPTR]]]   option bytes"
-  echo "  SDKR [h32 [rd32 [fr $F_SDKR]]]   SDK protected area"
-  echo "  WRPR [h32 [rd32 [fr $F_WRPR]]]   write-protected sectors (want 0xFFFFFFFF = none)"
+  # Decode rather than dump: each of these has an encoding where the "safe"
+  # value is not the obvious one.
+  set optr [rd32 [fr $F_OPTR]]
+  set sdkr [rd32 [fr $F_SDKR]]
+  set wrpr [rd32 [fr $F_WRPR]]
+
+  set rdp [expr {$optr & 0xFF}]
+  echo "  OPTR [h32 $optr]   RDP=[format 0x%02X $rdp] [expr {$rdp == 0xAA ? "- level 0, no readout protection" : "- READOUT PROTECTED"}]"
+
+  # SDK_STRT (bits 0-4) > SDK_END (bits 8-12) encodes an empty range.
+  set sstrt [expr {$sdkr & 0x1F}]
+  set send  [expr {($sdkr >> 8) & 0x1F}]
+  echo "  SDKR [h32 $sdkr]   start=$sstrt end=$send [expr {$sstrt > $send ? "- empty range, SDK protection off" : "- SDK PROTECTED"}]"
+
+  # 16 sectors of 4K in 64K flash, one bit each, 1 = unprotected. So the
+  # all-clear value here is 0x0000FFFF, not 0xFFFFFFFF.
+  set unprot [expr {$wrpr & 0xFFFF}]
+  echo "  WRPR [h32 $wrpr]   [expr {$unprot == 0xFFFF ? "all 16 sectors writable" : "SOME SECTORS WRITE-PROTECTED"}]"
 
   echo "factory timing block contents"
   set p [read_memory $base 32 5]
