@@ -32,7 +32,12 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 CFG="-f tools/x2.cfg -f tools/x2.tcl -f tools/py32_flash.tcl -f tools/linktest.tcl"
 TMP="${TMPDIR:-/tmp}/x2img.$$.tcl"
-STOCK="../x2_flash_dump.bin"
+# The stock image is NOT in this repo -- it is Geek Bar's firmware and not
+# ours to redistribute. Dump your own unit to this path (see
+# ../geekbar-pulse-x2-salvage.md) or point STOCK at it. The sha256 below is
+# what a clean read of my unit produced, so a matching hash means your dump
+# is byte-identical to the one the writeups describe.
+STOCK="${STOCK:-../x2_flash_dump.bin}"
 STOCK_SHA="dca474276128d86739b3dc5c5951b7c0919d7dcd95fe6c62396e38050182fa99"
 trap 'rm -f "$TMP"' EXIT
 
@@ -55,7 +60,8 @@ write_image() {
 confirm() {
   [ "${CONFIRM:-}" = "yes" ] && return 0
   echo "This overwrites the stock firmware on the connected unit." >&2
-  echo "Recovery needs x2_flash_dump.bin and a working SWD link." >&2
+  echo "Recovery needs your own stock dump at $STOCK (not shipped in this" >&2
+  echo "repo) and a working SWD link. Run '$0 dump' BEFORE writing." >&2
   echo "Re-run with CONFIRM=yes to proceed." >&2
   exit 1
 }

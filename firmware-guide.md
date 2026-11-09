@@ -577,7 +577,9 @@ Layers, cheapest first:
    bad image is just flashing again. This is the main defence and the reason
    for the hard rule in Part 1.
 2. **`x2_flash_dump.bin`** — a verified full copy of the factory firmware.
-   `./tools/x2.sh restore` puts it back.
+   `./tools/x2.sh restore` puts it back. **Dump this yourself before you
+   write anything** — it is not in this repo (it is Geek Bar's firmware, not
+   ours to ship), and it is your only cheap way back.
 3. **BOOT0** — pin PF4 on the MCU, wired through a 1 kΩ resistor. Pulling it
    high at reset boots Puya's factory bootloader instead of your program,
    which works even if flash contains garbage. Requires opening the case.

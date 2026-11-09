@@ -19,6 +19,11 @@ make disasm     # annotated disassembly
 | `beacon` | 480 B (0.73%) | 64 B (0.78%) |
 | `shell`  | 1080 B (1.65%) | 64 B (0.78%) |
 
+Sizes are toolchain-dependent. `make` prints the real numbers; on
+arm-none-eabi-gcc 14.2.1 `shell` builds to 1096 B rather than 1080 B.
+`make verify` asserts the image *fits*, not an exact size, so a few bytes
+either way is fine.
+
 Nothing here has been flashed to hardware yet.
 
 ## The one hard rule
@@ -235,5 +240,6 @@ small RAM-resident stub doing the 32 writes at full speed, driven the same way.
 
 ## Not done yet
 
-Nothing has been flashed. `../x2_flash_dump.bin` remains the only recovery
-image, and proving `restore` works is worth doing before it is ever needed.
+Nothing has been flashed. A stock dump at `../x2_flash_dump.bin` remains the
+only recovery image — dump your own unit first, it is not shipped here — and
+proving `restore` works is worth doing before it is ever needed.

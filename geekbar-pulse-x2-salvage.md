@@ -302,9 +302,16 @@ is much more reliable than hoping for one unbroken transfer.
   this closes that gap and is worth contributing upstream.
 
 ### Flash dump
-`x2_flash_dump.bin` (in this repo, sha256
-`dca474276128d86739b3dc5c5951b7c0919d7dcd95fe6c62396e38050182fa99`) — full
-64KB read from `0x08000000`, verified clean at both chunk-reassembly seams.
+`x2_flash_dump.bin` — full 64KB read from `0x08000000`, verified clean at both
+chunk-reassembly seams.
+
+> **Not included in this repository.** That image is Geek Bar's firmware and
+> not mine to redistribute. Dumping a unit you own is straightforward and
+> lawful — the steps are above, and no circumvention is involved because the
+> part ships unlocked. For reference, a clean read of my unit hashed to
+> sha256 `dca474276128d86739b3dc5c5951b7c0919d7dcd95fe6c62396e38050182fa99`,
+> so a matching hash means your dump is byte-identical to the one analysed
+> here. `fw/tools/x2.sh` checks against that hash automatically.
 - **No readout protection** — flash was freely readable.
 - Real code occupies roughly the first ~33KB (`0x08000000`–`~0x0800849c`).
 - A small structured block at offset `0xF000` (`aa55 aa55 ... 12345678 ...`)
